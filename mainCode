@@ -1,0 +1,519 @@
+/*
+* Project name: sport enrollment in linebot
+* Coder: TANG, YOU-ZENG
+* Email: christang426859@gmail.com
+/*
+
+/*
+*Credit:
+* 作者 : Chang Chun Shawn ( jcshawn.com )
+* 程式名稱 : 加一 LINE 紀錄機器人
+* 簡述 : 這是一個可以紀錄聊天室或群組傳「+1」訊息使用者的 LINE 機器人，將資料存放在 Google Sheet 中，基於 App Script 語法
+* 授權: Apache 2.0
+* 聯絡方式: contact@jcshawn.com
+* 最新更新 : 2022 / 3 / 30
+*/
+
+var CHANNEL_ACCESS_TOKEN = "";  // Linebot token
+var spreadSheetId = "";    //spreadsheet ID
+var spreadSheet = SpreadsheetApp.openById(spreadSheetId);
+
+const enrollASheetName = ["Enroll_A"];
+const enrollBSheetName = ["Enroll_B"];
+const enrollCSheetName = ["Enroll_C"];
+const enrollDSheetName = ["Enroll_D"];
+const ctrlSheetName = ["Control"]; // Control sheet name
+const admnSheetName = ["Administrator"];  // admin sheet
+
+const shtEnrA = spreadSheet.getSheetByName(enrollASheetName);
+const shtEnrB = spreadSheet.getSheetByName(enrollBSheetName);
+const shtEnrC = spreadSheet.getSheetByName(enrollCSheetName);
+const shtEnrD = spreadSheet.getSheetByName(enrollDSheetName);
+
+const shtAdmn = spreadSheet.getSheetByName(admnSheetName);
+const shtCtrl = spreadSheet.getSheetByName(ctrlSheetName);
+
+const botStarted = 'B1';
+const nowPlayingA = 'B2';
+const nowPlayingB = 'B3';
+const nowPlayingC = 'B4';
+const nowPlayingD = 'B5';
+
+
+function doPost(e) {
+
+  var userData = JSON.parse(e.postData.contents);
+
+  const replyToken = userData.events[0].replyToken;
+  const userMessage = userData.events[0].message.text.trim().toUpperCase(); // get user's message, remove whitespace from both ends, convert to upper case
+  const userID = userData.events[0].source.userId; 
+  const groupID = userData.events[0].source.groupId;
+  const userName = getUserName(groupID, userID);
+  const eventType = userData.events[0].source.type; // 分辨是個人聊天室還是群組，等等會用到
+
+  reply("🤖\n" + switchMsg(userName, userID, userMessage, groupID), replyToken);
+
+
+}
+
+function switchMsg(userName, userId, userMsg, groupId) {
+
+    // General command
+    if (["A+1", "B+1", "C+1", "D+1"].includes(userMsg)) {
+        return enroll(userMsg, userName, userId);
+    } else if (["A NEXT", "B NEXT", "C NEXT", "D NEXT"].includes(userMsg)) {
+        return callNext(userMsg);
+    } else if (userMsg === "CHECK") {
+        return checkIfEnrolled(userId);
+    } else if (["A", "B", "C", "D"].includes(userMsg)) {
+        return showList(userMsg);
+    } else if (userMsg === "STATUS") {
+        return showStatus();
+    } else if (userMsg === "CANCEL") {
+        return deleteUser(userName, userId);
+    } else if (userMsg === "SHOW USER ID") {
+        return showUserId(userId);
+
+    // Need permission
+    } else if (userMsg === "CLEAR") {
+        return havePermission(userId) ? clearSheet() : "No permission";
+    } else if (userMsg === "START") {
+        return havePermission(userId) ? startBot() : "No permission";
+    } else if (userMsg === "END") {
+        return havePermission(userId) ? endBot() : "No permission";
+    } else if (userMsg === "SHOW GROUP ID") {
+        return havePermission(userId) ? groupId : "No permission";
+
+    } else {
+        return unknownCommand();
+    }
+}
+
+
+function callNext(userMsg = null, court = null, additionalMsg = "") {
+    if (court === null) {
+        court = getCourt(userMsg);
+    }
+
+    var lastRowIndex = lastRow(court) - 1;
+    var nowPlayingIndexValue = nowPlayingIndex(court);
+
+    if (lastRowIndex === nowPlayingIndexValue) {
+        return additionalMsg + court + " 場地尚未有人報隊";
+    } else {
+        nowPlayingIndex(court, nowPlayingIndexValue + 1);
+        var nextUserName = getUserList("name", court)[0];
+        return additionalMsg + "請 " + nextUserName + " 上 " + court + " 場地";
+    }
+}
+
+
+function enroll(userMsg, userName, userId) {
+
+    var [court, index] = findUserInCourt(userId);
+    var replyMessage = "";
+
+    // can't find user (haven't enrolled yet)
+    if (court === null) {
+        court = getCourt(userMsg);
+        // Add the user to the end of the list
+        theSht(court).appendRow([userName, userId]);
+        replyMessage += userName + " 報 " + court + " 場成功！\n\n";
+        replyMessage += showList(court);
+        return replyMessage
+    }
+
+    if (index === 0) {
+        replyMessage += "您應正在 " + court + " 場地打球，請下場後再報隊";
+    } else {
+        replyMessage += "您已經報隊 " + court + " 場地了\n前方還有 " + (index - 1) + " 組\n\n";
+        replyMessage += showList(court);
+    }
+
+    return replyMessage;
+}
+
+
+function checkIfEnrolled(userId) {
+    var [court, index] = findUserInCourt(userId);
+    if (court === null) {
+        return "您還尚未報隊";  // User not enrolled
+    }
+
+    var replyMessage;
+
+    if (index === 0) {
+        replyMessage = "您應正在 " + court + " 場地打球，請下場後再報隊";
+    } else {
+        replyMessage = "您已經報 " + court + " 場了\n前方還有 " + (index - 1) + " 組";
+        replyMessage += "\n\n" + showList(court);
+    }
+
+    return replyMessage;
+}
+
+
+function showList(court) {
+    let replyMessage = "";
+    let userNameList = getUserList("name", court);
+
+    replyMessage += court + "場地名單：\n\n";
+
+    userNameList.forEach((theName, i) => {
+        if (i === 0) {
+            if (theName === "N/A") {
+                replyMessage += "【現正在場】\n  無人在場上\n\n";
+            } else {
+                replyMessage += "【現正在場】\n  " + theName + "\n\n";
+            }
+        } else if (i === 1) {
+            replyMessage += "【等候名單】\n";
+            replyMessage += "  " + i + ". " + theName + "\n";
+        } else {
+            replyMessage += "  " + i + ". " + theName + "\n";
+        }
+    });
+
+    return replyMessage;
+}
+
+
+function showStatus() {
+    let replyMessage = "";
+    for (const court of ['A', 'B', 'C', 'D']) {
+        [noUsed, index] = findUserInCourt(null, court);  // Pass null to waitingIndex to get the total waiting count
+        replyMessage += `${court}. ${-index - 1} waiting\n`;
+    }
+
+    return replyMessage;
+}
+
+
+function clearSheet(court = null) {
+  if (court === null) {
+    // Clear all courts
+    ['A', 'B', 'C', 'D'].forEach(function(court) {
+      var shtEnroll = theSht(court);
+      nowPlayingIndex(court, 0); // Reset now playing index to 0
+
+      // Clear contents starting from cell A2 to the last row and column with data
+      var lastRow = shtEnroll.getLastRow();
+      var lastColumn = shtEnroll.getLastColumn();
+      if (lastRow > 1) {
+        shtEnroll.getRange(2, 1, lastRow - 1, lastColumn).clearContent();
+      }
+    });
+    return "All sheets are cleared";
+    
+  } else {
+    // Clear specific court
+    nowPlayingIndex(court, 0); // Reset now playing index to 0
+    var shtEnroll = theSht(court);
+
+    // Clear contents starting from cell A2 to the last row and column with data
+    var lastRow = shtEnroll.getLastRow();
+    var lastColumn = shtEnroll.getLastColumn();
+    if (lastRow > 1) {
+      shtEnroll.getRange(2, 1, lastRow - 1, lastColumn).clearContent();
+    }
+    return "Worksheet " + court + " is cleared";
+  }
+}
+
+
+function showUserId(userID){
+  return userID;
+}
+
+
+function deleteUser(userName, userId) {
+    var [court, index] = findUserInCourt(userId);
+    if (court === null) {
+        return "未找到您的報隊紀錄";  // User not found
+    }
+
+    var shtEnroll = theSht(court);
+    var playingIndex = nowPlayingIndex(court);
+    
+    // Delete the user row based on the current index
+    shtEnroll.deleteRow(playingIndex + index + 1);
+
+    if (index === 0) {  // Deleting the now-playing user
+        nowPlayingIndex(court, nowPlayingIndex(court) - 1);  // Update the now-playing index
+        return callNext(null, court, "已取消" + userName + "在" + court + "場的報隊\n");
+    }
+
+    return "已取消 " + userName + " 在 " + court + " 場的報隊\n\n" + showList(court);
+}
+
+
+function unknownCommand(){
+  return "Unknown Command";
+}
+
+function isEnrolled(userId, court) {
+    var shtEnroll = theSht(court);  // Get the appropriate sheet for the court
+    var colValues = shtEnroll.getRange(1, 2, shtEnroll.getLastRow(), 1).getValues().flat().filter(String);  // Get column 2 (ID column), filter out empty values
+    return colValues.includes(userId);  // Check if userId is in the list
+}
+
+
+function lastRow(court) {
+    var shtEnroll = theSht(court);  // Get the sheet based on the court
+    var colValues = shtEnroll.getRange(1, 1, shtEnroll.getLastRow(), 1).getValues().flat().filter(String);  // Get column 1 values, filter out empty
+    return colValues.length;  // Return the number of non-empty rows
+}
+
+
+function nowPlayingIndex(court, updateValue = undefined) {
+    if (updateValue === undefined) {
+        if (court === 'A') {
+            return parseInt(shtCtrl.getRange(nowPlayingA).getValue());
+        } else if (court === 'B') {
+            return parseInt(shtCtrl.getRange(nowPlayingB).getValue());
+        } else if (court === 'C') {
+            return parseInt(shtCtrl.getRange(nowPlayingC).getValue());
+        } else if (court === 'D') {
+            return parseInt(shtCtrl.getRange(nowPlayingD).getValue());
+        } else {
+            return -1;
+        }
+    } else {
+        if (court === 'A') {
+            shtCtrl.getRange(nowPlayingA).setValue(updateValue);
+        } else if (court === 'B') {
+            shtCtrl.getRange(nowPlayingB).setValue(updateValue);
+        } else if (court === 'C') {
+            shtCtrl.getRange(nowPlayingC).setValue(updateValue);
+        } else if (court === 'D') {
+            shtCtrl.getRange(nowPlayingD).setValue(updateValue);
+        } else {
+            return -1;
+        }
+    }
+}
+
+
+function getUserList(theType, court) {
+    var shtEnroll = theSht(court);  // Use theSht() instead of the_wks()
+    var userList;
+
+    // Check the type to determine which column to retrieve
+    if (theType === "id") {
+        userList = shtEnroll.getRange(1, 2, shtEnroll.getLastRow(), 1).getValues().flat().filter(String);  // Column 2
+    } else if (theType === "name") {
+        userList = shtEnroll.getRange(1, 1, shtEnroll.getLastRow(), 1).getValues().flat().filter(String);  // Column 1
+    } else {
+        return ["Unknown type"];
+    }
+
+    var playingIndex = nowPlayingIndex(court);
+
+    // Handle the user list based on the playing index
+    if (playingIndex === 0) {
+        userList[0] = "N/A";  // First user is playing
+    } else {
+        userList = userList.slice(playingIndex);  // Remove users before the playing index
+    }
+
+    return userList;
+}
+
+
+function theSht(court) {
+    if (court === 'A') {
+        return shtEnrA;
+    } else if (court === 'B') {
+        return shtEnrB;
+    } else if (court === 'C') {
+        return shtEnrC;
+    } else if (court === 'D') {
+        return shtEnrD;
+    } else {
+        return -1;
+    }
+}
+
+
+function getCourt(userMsg) {
+    if (["A+1", "A NEXT"].includes(userMsg)) {
+        return 'A';
+    } else if (["B+1", "B NEXT"].includes(userMsg)) {
+        return 'B';
+    } else if (["C+1", "C NEXT"].includes(userMsg)) {
+        return 'C';
+    } else if (["D+1", "D NEXT"].includes(userMsg)) {
+        return 'D';
+    } else {
+        console.log("func getCourt error")
+        return "error";
+    }
+}
+
+
+function findUserInCourt(userId, court){  // return an array [court: string, waitingIndex: int]
+
+    // Return the negative of the total waiting amount if userId is not provided
+    if (userId === null) {
+        return [court, -getUserList("id", court).length];
+    }
+
+
+    // find user
+    for (const court of ['A', 'B', 'C', 'D']) {
+        var userList = getUserList("id", court);
+        for (var i = 0; i < userList.length; i++) {
+            var theId = userList[i];
+            if (theId === userId) {
+                return [court, i];  // If the user is found, return the court and index
+            }
+        }
+
+    }
+    
+    return [null, -userList.length];  //user not found
+}
+
+
+function havePermission(userId) {
+
+  var adminList = shtAdmn.getRange(2, 2, shtAdmn.getLastRow() - 1, 1).getValues().flat();
+  
+  return adminList.includes(userId);
+}
+
+
+function getUserName(groupID, userID){
+  // Get user's name
+  var response = UrlFetchApp.fetch("https://api.line.me/v2/bot/group/" + groupID + "/member/" + userID, {
+      "method": "GET",
+      "headers": {
+        "Authorization": "Bearer " + CHANNEL_ACCESS_TOKEN, 
+        "Content-Type": "application/json"
+      },
+    });
+
+  var namedata = JSON.parse(response); // parse json
+  return namedata.displayName; // return displayName in json
+}
+
+
+function createReplyMessage(msg, quickReply = true) {
+  // Create the basic reply message
+  var replyMessage = [
+    {
+      "type": "text",
+      "text": msg
+    }
+  ];
+
+  // Conditionally add the quickReply buttons if quickReply is true
+  if (quickReply) {
+    replyMessage[0]["quickReply"] = {
+      "items": [
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "報A場",
+            "text": "A+1"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "報B場",
+            "text": "B+1"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "報C場",
+            "text": "C+1"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "報D場",
+            "text": "D+1"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "查看各場人數",
+            "text": "Status"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "取消我的報隊",
+            "text": "Cancel"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "呼叫A場下一隊",
+            "text": "A Next"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "呼叫B場下一隊",
+            "text": "B Next"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "呼叫C場下一隊",
+            "text": "C Next"
+          }
+        },
+        {
+          "type": "action",
+          "action": {
+            "type": "message",
+            "label": "呼叫D場下一隊",
+            "text": "D Next"
+          }
+        }
+      ]
+    };
+  }
+
+  return replyMessage;
+}
+
+
+function reply(msg, replyToken, quickReply = true) {
+  // Create the reply message
+  var replyMessage = createReplyMessage(msg, quickReply);
+
+  // Send the reply message to LINE
+  var url = 'https://api.line.me/v2/bot/message/reply';
+  UrlFetchApp.fetch(url, {
+    'headers': {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + CHANNEL_ACCESS_TOKEN,
+    },
+    'method': 'post',
+    'payload': JSON.stringify({
+      'replyToken': replyToken,
+      'messages': replyMessage,
+    }),
+  });
+}
